@@ -1,0 +1,13 @@
+.{
+    .fingerprint = 0xab6232b4e1d4c799,
+    .name = .cirebronx,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "docs",
+    },
+}
