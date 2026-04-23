@@ -4,6 +4,10 @@ pub const ToolKind = enum {
     read_file,
     list_files,
     grep,
+    rg_search,
+    glob_search,
+    web_fetch,
+    web_search,
     list_skills,
     git_status,
     git_worktree_list,
@@ -11,6 +15,7 @@ pub const ToolKind = enum {
     shell_command,
     write_file,
     edit_file,
+    apply_patch,
     create_task_note,
 };
 

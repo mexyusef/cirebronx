@@ -75,7 +75,7 @@ pub fn printHelp() !void {
         \\  cirebronx "prompt"     Run a single prompt
         \\  cirebronx --resume     Resume latest session
         \\  cirebronx --resume ID  Resume a specific session
-        \\  CIREBRONX_PROVIDER=gemini cirebronx "hello"
+        \\  CIREBRONX_PROVIDER=groq cirebronx "hello"
         \\  cirebronx --help       Show help
         \\  cirebronx --version    Show version
         \\

@@ -1,11 +1,17 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn writeFileAbsolute(path: []const u8, content: []const u8) !void {
     const dir_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
+    const process_id: u32 = switch (builtin.os.tag) {
+        .windows => std.os.windows.GetCurrentProcessId(),
+        else => 0,
+    };
 
-    const tmp_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}.tmp-{d}", .{
+    const tmp_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}.tmp-{d}-{d}", .{
         path,
-        std.time.timestamp(),
+        std.time.nanoTimestamp(),
+        process_id,
     });
     defer std.heap.page_allocator.free(tmp_path);
 

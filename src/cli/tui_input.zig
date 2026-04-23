@@ -2,6 +2,11 @@ const std = @import("std");
 const ziggy = @import("ziggy");
 
 const App = @import("../core/app.zig").App;
+const windows = std.os.windows;
+
+const WAIT_OBJECT_0: windows.DWORD = 0;
+const WAIT_TIMEOUT: windows.DWORD = 258;
+const ESC_SEQUENCE_WAIT_MS: windows.DWORD = 100;
 
 pub fn handleInputControlKey(program: anytype, app: *App, key: ziggy.Key) !void {
     switch (key) {
@@ -43,6 +48,7 @@ pub fn handlePaneChar(
     comptime submitCurrentInputFn: anytype,
     comptime conversationItemCountFn: anytype,
     comptime activityItemCountFn: anytype,
+    comptime repoItemCountFn: anytype,
     comptime paneFocusStringFn: anytype,
 ) !bool {
     switch (byte) {
@@ -88,6 +94,7 @@ pub fn handlePaneChar(
             switch (program.model.focus) {
                 .conversation => program.model.conversation_selected = 0,
                 .activity => program.model.activity_selected = 0,
+                .repo => program.model.repo_state.tree_state.selection.cursor = 0,
                 .input => {},
             }
             program.model.syncScrollBounds(program.tty.size);
@@ -103,6 +110,10 @@ pub fn handlePaneChar(
                 .activity => {
                     const total = activityItemCountFn(&program.model);
                     if (total > 0) program.model.activity_selected = total - 1;
+                },
+                .repo => {
+                    const total = try repoItemCountFn(&program.model, app.allocator);
+                    if (total > 0) program.model.repo_state.tree_state.selection.cursor = total - 1;
                 },
                 .input => {},
             }
@@ -166,13 +177,20 @@ pub fn handlePaneChar(
     return false;
 }
 
-pub fn readEventAlloc(allocator: std.mem.Allocator, stdin: anytype) !?ziggy.Event {
+pub fn readEventAlloc(allocator: std.mem.Allocator, stdin: anytype, stdin_file: ?std.fs.File) !?ziggy.Event {
     const first = stdin.takeByte() catch |err| switch (err) {
         error.EndOfStream => return null,
         else => return err,
     };
 
     if (first != 0x1b) return ziggy.parseOne(&[_]u8{first}).?.event;
+    if (@import("builtin").os.tag == .windows) {
+        if (stdin_file) |file| {
+            const wait_result = windows.kernel32.WaitForSingleObject(file.handle, ESC_SEQUENCE_WAIT_MS);
+            if (wait_result == WAIT_TIMEOUT) return .{ .key = .escape };
+            if (wait_result != WAIT_OBJECT_0) return .{ .key = .escape };
+        }
+    }
     const second = stdin.takeByte() catch return .{ .key = .escape };
     if (second != '[') return ziggy.parseOne(&[_]u8{ first, second }).?.event;
     const third = stdin.takeByte() catch return .{ .key = .escape };
@@ -237,17 +255,28 @@ pub fn readEventAlloc(allocator: std.mem.Allocator, stdin: anytype) !?ziggy.Even
             allocator.free(owned);
             return (try ziggy.parseBracketedPaste(allocator, encoded)).?.event;
         }
-        return .{ .key = .escape };
+        return try readCsiSequence(allocator, stdin, first, second, third);
     }
-    if (third == '1') {
-        const fourth = stdin.takeByte() catch return .{ .key = .escape };
-        const fifth = stdin.takeByte() catch return .{ .key = .escape };
-        const sixth = stdin.takeByte() catch return .{ .key = .escape };
-        return ziggy.parseOne(&[_]u8{ first, second, third, fourth, fifth, sixth }).?.event;
+    return try readCsiSequence(allocator, stdin, first, second, third);
+}
+
+fn readCsiSequence(allocator: std.mem.Allocator, stdin: anytype, first: u8, second: u8, third: u8) !ziggy.Event {
+    var seq = std.ArrayList(u8).empty;
+    defer seq.deinit(allocator);
+    try seq.appendSlice(allocator, &[_]u8{ first, second, third });
+
+    if (isCsiFinalByte(third)) {
+        return ziggy.parseOne(seq.items).?.event;
     }
-    if (third == '5' or third == '6') {
-        const fourth = stdin.takeByte() catch return .{ .key = .escape };
-        return ziggy.parseOne(&[_]u8{ first, second, third, fourth }).?.event;
+
+    while (true) {
+        const byte = stdin.takeByte() catch return .{ .key = .escape };
+        try seq.append(allocator, byte);
+        if (isCsiFinalByte(byte)) break;
     }
-    return ziggy.parseOne(&[_]u8{ first, second, third }).?.event;
+    return ziggy.parseOne(seq.items).?.event;
+}
+
+fn isCsiFinalByte(byte: u8) bool {
+    return byte == '~' or (byte >= '@' and byte <= 'Z') or (byte >= 'a' and byte <= 'z');
 }

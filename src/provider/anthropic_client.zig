@@ -4,6 +4,7 @@ const App = @import("../core/app.zig").App;
 const message_mod = @import("../core/message.zig");
 const tool_base = @import("../tools/base.zig");
 const provider_types = @import("types.zig");
+const provider_prompt = @import("prompt.zig");
 
 pub const TurnResult = provider_types.TurnResult;
 pub const TurnObserver = provider_types.TurnObserver;
@@ -115,20 +116,16 @@ fn buildRequestBody(
 ) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
+    const runtime_prompt = try provider_prompt.buildRuntimePrompt(allocator, tools);
+    defer allocator.free(runtime_prompt);
 
     try out.writer.writeByte('{');
     try out.writer.writeAll("\"model\":");
     try std.json.Stringify.value(app.config.model, .{}, &out.writer);
     try out.writer.writeAll(",\"max_tokens\":4096");
 
-    if (app.plan_mode) {
-        try out.writer.writeAll(",\"system\":");
-        try std.json.Stringify.value(
-            "You are Cirebronx, a coding agent. Prefer tool use for inspection and edits. Keep plans explicit before complex changes.",
-            .{},
-            &out.writer,
-        );
-    }
+    try out.writer.writeAll(",\"system\":");
+    try std.json.Stringify.value(runtime_prompt, .{}, &out.writer);
 
     try out.writer.writeAll(",\"messages\":[");
     try writeMessages(&out.writer, app.session.items);
@@ -154,6 +151,21 @@ fn buildRequestBody(
     try out.writer.writeAll(if (stream) "true" else "false");
     try out.writer.writeByte('}');
     return out.toOwnedSlice();
+}
+
+test "buildRequestBody always includes anthropic system prompt" {
+    var app = try App.init(std.testing.allocator);
+    defer app.deinit();
+    std.testing.allocator.free(app.config.model);
+    app.config.model = try std.testing.allocator.dupe(u8, "claude-test");
+    std.testing.allocator.free(app.config.provider);
+    app.config.provider = try std.testing.allocator.dupe(u8, "anthropic");
+
+    const body = try buildRequestBody(std.testing.allocator, &app, &.{}, true);
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"system\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Tool inventory") != null);
 }
 
 fn parseStreamingResponse(

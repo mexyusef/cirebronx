@@ -48,6 +48,17 @@ fn hasWorkspaceIntent(lower: []const u8) bool {
         "grep", "directory", "folder", "path", "terminal", "shell command",
         "git", "worktree", "mcp", "plugin", "skill", "build", "test",
         "fix this", "edit", "patch", "write file", "change file", "inspect", "scan",
+        "tool", "tools", "filesystem", "file system", "built-in tools", "built in tools",
+        "create file", "update file", "replace text", "edit file", "modify file",
+        "create app", "build app", "create project", "build project", "generate project",
+        "scaffold", "bootstrap", "implement", "make app", "make project",
+        "todo app", "flask app", "python app", "write code", "create code",
+        "rename", "rename symbol", "refactor", "across repo", "across project",
+        "multiple files", "multi file", "multi-file", "update imports", "fix tests",
+        "run tests", "compile", "lint", "build failure", "test failure",
+        "bash", "powershell", "command line", "terminal command", "rg", "ripgrep",
+        "web", "website", "search web", "web search", "fetch url", "fetch page", "read url",
+        "open url", "visit url", "browse", "browser",
     };
     for (strong_terms) |term| {
         if (std.mem.indexOf(u8, lower, term) != null) return true;
@@ -114,6 +125,38 @@ test "selectToolsForTurn keeps tools for workspace file request" {
         .description = "Read file",
         .schema_json = "{}",
         .permission = .read,
+    };
+    const selected = selectToolsForTurn(&app, &.{tool});
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+}
+
+test "selectToolsForTurn keeps tools for create-project request" {
+    var app = try App.init(std.testing.allocator);
+    defer app.deinit();
+
+    try app.appendMessage(.{ .role = .user, .content = "create simple python flask todo app" });
+    const tool = tool_base.ToolSpec{
+        .kind = .write_file,
+        .name = "write_file",
+        .description = "Write file",
+        .schema_json = "{}",
+        .permission = .write,
+    };
+    const selected = selectToolsForTurn(&app, &.{tool});
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+}
+
+test "selectToolsForTurn keeps tools for repo-wide refactor request" {
+    var app = try App.init(std.testing.allocator);
+    defer app.deinit();
+
+    try app.appendMessage(.{ .role = .user, .content = "rename Config to AppConfig across repo and update imports" });
+    const tool = tool_base.ToolSpec{
+        .kind = .apply_patch,
+        .name = "apply_patch",
+        .description = "Apply patch",
+        .schema_json = "{}",
+        .permission = .write,
     };
     const selected = selectToolsForTurn(&app, &.{tool});
     try std.testing.expectEqual(@as(usize, 1), selected.len);

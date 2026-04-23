@@ -14,8 +14,8 @@ pub const PermissionMode = enum {
 
 pub const PermissionSet = struct {
     read: PermissionMode = .allow,
-    write: PermissionMode = .ask,
-    shell: PermissionMode = .ask,
+    write: PermissionMode = .allow,
+    shell: PermissionMode = .allow,
 
     pub fn forClass(self: *const PermissionSet, class: PermissionClass) PermissionMode {
         return switch (class) {

@@ -19,6 +19,36 @@ pub const ConversationDocument = struct {
     }
 };
 
+pub const ConversationTranscript = struct {
+    messages: []ziggy.AgentTranscript.Message,
+
+    pub fn deinit(self: *ConversationTranscript, allocator: std.mem.Allocator) void {
+        for (self.messages) |message| {
+            allocator.free(message.body);
+            if (message.title) |title| allocator.free(title);
+            if (message.meta) |meta| allocator.free(meta);
+            if (message.badge) |badge| allocator.free(badge);
+        }
+        allocator.free(self.messages);
+    }
+};
+
+pub const RepoEntries = struct {
+    paths: [][]u8,
+    entries: []ziggy.FileTreeBrowser.Entry,
+
+    pub fn deinit(self: *RepoEntries, allocator: std.mem.Allocator) void {
+        for (self.paths) |path| allocator.free(path);
+        allocator.free(self.paths);
+        allocator.free(self.entries);
+    }
+};
+
+const RepoDirItem = struct {
+    name: []u8,
+    is_dir: bool,
+};
+
 pub fn buildConversationItems(
     allocator: std.mem.Allocator,
     app: *const App,
@@ -71,7 +101,7 @@ pub fn buildConversationItems(
                 app.session.items.len + 1,
                 ziggy.FormatText.previewText(pending_prompt.?, 56),
             }),
-            .body = try std.fmt.allocPrint(allocator, "Current prompt:\n{s}\n\nprovider:\n{s}:{s}\n\nstatus:\n{s}\n\ncurrent tool:\n{s}\n\nlast error:\n{s}\n\nrecent activity:\n{s}\n", .{
+            .body = try std.fmt.allocPrint(allocator, "prompt: {s}\nprovider: {s}:{s}\nstatus: {s}\ntool: {s}\nerror: {s}\nactivity: {s}", .{
                 pending_prompt.?,
                 app.config.provider,
                 app.config.model,
@@ -100,6 +130,7 @@ pub fn buildConversationItems(
 
 pub fn buildConversationDocument(
     allocator: std.mem.Allocator,
+    agent_theme: ziggy.AgentTheme,
     app: *const App,
     selected_index: usize,
     turn_running: bool,
@@ -132,15 +163,7 @@ pub fn buildConversationDocument(
         allocator.free(entries);
     }
 
-    const body_theme = ziggy.FormatRichMarkdown.Theme{
-        .base = .{ .fg = .{ .ansi = 7 } },
-        .heading = .{ .fg = .{ .ansi = 14 }, .bold = true },
-        .bullet = .{ .fg = .{ .ansi = 11 }, .bold = true },
-        .quote = .{ .fg = .{ .ansi = 6 }, .dim = true },
-        .code = .{ .fg = .{ .ansi = 10 }, .bg = .{ .ansi = 8 } },
-        .muted = .{ .fg = .{ .ansi = 8 }, .dim = true },
-        .accent = .{ .fg = .{ .ansi = 12 }, .bold = true },
-    };
+    const body_theme = conversationMarkdownTheme(agent_theme);
 
     for (items, 0..) |item, index| {
         const badge = transcriptBadge(item.label);
@@ -151,11 +174,11 @@ pub fn buildConversationDocument(
             .selected = index == selected_index,
             .badge = badge,
             .meta = meta,
-            .title_style = .{ .fg = .{ .ansi = 7 }, .bold = true },
-            .selected_title_style = .{ .fg = .{ .ansi = 15 }, .bg = .{ .ansi = 4 }, .bold = true },
+            .title_style = agent_theme.selected_alt,
+            .selected_title_style = agent_theme.selected,
             .badge_style = transcriptBadgeStyle(badge),
-            .meta_style = .{ .fg = .{ .ansi = 8 }, .dim = true },
-            .separator_style = .{ .fg = .{ .ansi = 8 }, .dim = true },
+            .meta_style = agent_theme.status_idle,
+            .separator_style = agent_theme.status_idle,
             .body_theme = body_theme,
         };
     }
@@ -166,6 +189,71 @@ pub fn buildConversationDocument(
         .lines = rendered.lines,
         .selected_line = rendered.selected_line,
         .entry_starts = rendered.entry_starts,
+    };
+}
+
+pub fn buildConversationTranscript(
+    allocator: std.mem.Allocator,
+    agent_theme: ziggy.AgentTheme,
+    app: *const App,
+    selected_index: usize,
+    turn_running: bool,
+    pending_prompt: ?[]const u8,
+    current_tool: ?[]const u8,
+    last_error: ?[]const u8,
+    live_assistant: ?[]const u8,
+    status_text: []const u8,
+    actions: []const []u8,
+) !ConversationTranscript {
+    _ = agent_theme;
+    const items = try buildConversationItems(
+        allocator,
+        app,
+        turn_running,
+        pending_prompt,
+        current_tool,
+        last_error,
+        live_assistant,
+        status_text,
+        actions,
+    );
+    defer freeItems(allocator, items);
+
+    const messages = try allocator.alloc(ziggy.AgentTranscript.Message, items.len);
+    for (items, 0..) |item, index| {
+        const badge = transcriptBadge(item.label);
+        messages[index] = .{
+            .role = transcriptRole(item.label),
+            .title = try allocator.dupe(u8, transcriptTitle(item.label)),
+            .body = try allocator.dupe(u8, item.body),
+            .selected = index == selected_index,
+            .meta = null,
+            .badge = if (badge) |text| try allocator.dupe(u8, text) else null,
+        };
+    }
+    return .{ .messages = messages };
+}
+
+fn conversationMarkdownTheme(agent_theme: ziggy.AgentTheme) ziggy.FormatRichMarkdown.Theme {
+    return .{
+        .base = agent_theme.pane,
+        .heading = agent_theme.selected_alt,
+        .bullet = agent_theme.selected,
+        .quote = agent_theme.status_idle,
+        .code = .{
+            .fg = agent_theme.selected.fg,
+            .bg = agent_theme.pane.bg,
+            .bold = true,
+        },
+        .strong = .{ .bold = true },
+        .emphasis = .{ .underline = true },
+        .link = .{
+            .fg = agent_theme.selected_alt.fg,
+            .underline = true,
+        },
+        .muted = agent_theme.status_idle,
+        .accent = agent_theme.selected_alt,
+        .code_lineno = agent_theme.status_idle,
     };
 }
 
@@ -190,6 +278,8 @@ pub fn buildActivityItems(
         .{ .label = "Shortcut: /config", .body = "Show provider, model, base_url, permissions, and plan state." },
         .{ .label = "Shortcut: /sessions", .body = "List recent saved sessions." },
         .{ .label = "Shortcut: /resume", .body = "Resume a stored session." },
+        .{ .label = "Shortcut: /mcp status", .body = "Check configured MCP servers and their live tool availability." },
+        .{ .label = "Shortcut: /skills show pdf", .body = "Preview a skill prompt before running it." },
     };
     for (shortcuts) |entry| {
         try list.append(allocator, .{
@@ -294,6 +384,36 @@ pub fn freeItems(allocator: std.mem.Allocator, items: []Item) void {
     allocator.free(items);
 }
 
+pub fn buildRepoEntries(
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    expanded_paths: []const []const u8,
+    limit: usize,
+) !RepoEntries {
+    const paths = try collectRepoPaths(allocator, root_path, expanded_paths, limit);
+    errdefer {
+        for (paths) |path| allocator.free(path);
+        allocator.free(paths);
+    }
+
+    const entries = try allocator.alloc(ziggy.FileTreeBrowser.Entry, paths.len);
+    errdefer allocator.free(entries);
+
+    for (paths, 0..) |path, index| {
+        const is_dir = std.mem.endsWith(u8, path, "/");
+        const trimmed = std.mem.trimRight(u8, path, "/");
+        entries[index] = .{
+            .path = path,
+            .label = repoLabelFromPath(trimmed),
+            .depth = repoPathDepth(trimmed),
+            .is_dir = is_dir,
+            .expanded = is_dir and repoPathIsExpanded(expanded_paths, trimmed),
+        };
+    }
+
+    return .{ .paths = paths, .entries = entries };
+}
+
 fn transcriptBadge(label: []const u8) ?[]const u8 {
     if (std.mem.indexOf(u8, label, "[user]") != null) return "USER";
     if (std.mem.indexOf(u8, label, "[assistant/tools]") != null) return "TOOLS";
@@ -302,6 +422,16 @@ fn transcriptBadge(label: []const u8) ?[]const u8 {
     if (std.mem.indexOf(u8, label, "[pending]") != null) return "PENDING";
     if (std.mem.indexOf(u8, label, "[tool]") != null) return "TOOL";
     return null;
+}
+
+fn transcriptRole(label: []const u8) ziggy.AgentTranscript.Role {
+    if (std.mem.indexOf(u8, label, "[user]") != null) return .user;
+    if (std.mem.indexOf(u8, label, "[assistant/tools]") != null) return .tool;
+    if (std.mem.indexOf(u8, label, "[assistant/live]") != null) return .assistant;
+    if (std.mem.indexOf(u8, label, "[assistant]") != null) return .assistant;
+    if (std.mem.indexOf(u8, label, "[pending]") != null) return .system;
+    if (std.mem.indexOf(u8, label, "[tool]") != null) return .tool;
+    return .system;
 }
 
 fn transcriptBadgeStyle(badge: ?[]const u8) ziggy.Style {
@@ -369,7 +499,7 @@ fn formatToolGroupItem(allocator: std.mem.Allocator, messages: []const message_m
     };
     defer allocator.free(tool_names);
 
-    try out.writer.print("## Tool execution\n\nstart message: {d}\nrole: assistant\ntool calls: {d}\nresults: {d}\nstatus: {s}\ntools: {s}\n", .{
+    try out.writer.print("start={d} role=assistant calls={d} results={d} status={s} tools={s}\n", .{
         start_index + 1,
         first.tool_calls.len,
         tool_result_count,
@@ -378,37 +508,38 @@ fn formatToolGroupItem(allocator: std.mem.Allocator, messages: []const message_m
     });
 
     if (first.content.len > 0) {
-        try out.writer.print("\n### Assistant content\n\n{s}\n", .{first.content});
+        try out.writer.print("assistant: {s}\n", .{first.content});
     }
 
     if (first.tool_calls.len > 0) {
-        try out.writer.writeAll("\n### Requested tool calls\n\n");
         for (first.tool_calls, 0..) |call, call_index| {
-            try out.writer.print("{d}. `{s}` (`{s}`)\n\n**arguments**\n\n```json\n{s}\n```\n\n", .{
+            const arg_summary = try summarizeToolArguments(allocator, call.arguments);
+            defer allocator.free(arg_summary);
+            try out.writer.print("call {d}: {s} ({s})", .{
                 call_index + 1,
                 call.name,
                 call.id,
-                call.arguments,
             });
+            if (arg_summary.len > 0) try out.writer.print(" -> {s}", .{arg_summary});
+            try out.writer.writeAll("\n");
         }
     }
 
     if (tool_result_count > 0) {
-        try out.writer.writeAll("### Tool results\n\n");
         const result_slice = if (has_followup) messages[1 .. messages.len - 1] else messages[1..];
         for (result_slice, 0..) |msg, result_index| {
-            try out.writer.print("{d}. `{s}` (`{s}`)\n\n**result**\n\n```\n{s}\n```\n\n", .{
+            try out.writer.print("result {d}: {s} ({s}) -> {s}\n", .{
                 result_index + 1,
                 msg.tool_name orelse "<unknown>",
                 msg.tool_call_id orelse "<none>",
-                if (msg.content.len > 0) msg.content else "<empty>",
+                previewToolResult(msg.content),
             });
         }
     }
 
     if (has_followup) {
         const final_msg = messages[messages.len - 1];
-        try out.writer.print("### Assistant follow-up\n\n{s}\n", .{
+        try out.writer.print("follow-up: {s}\n", .{
             if (final_msg.content.len > 0) final_msg.content else "<empty>",
         });
     }
@@ -443,12 +574,15 @@ fn formatMessageBody(allocator: std.mem.Allocator, msg: message_mod.Message, ind
     if (msg.tool_calls.len > 0) {
         try out.writer.writeAll("\nRequested tools:\n\n");
         for (msg.tool_calls, 0..) |call, call_index| {
-            try out.writer.print("{d}. `{s}` (`{s}`)\n\n```json\n{s}\n```\n\n", .{
+            const arg_summary = try summarizeToolArguments(allocator, call.arguments);
+            defer allocator.free(arg_summary);
+            try out.writer.print("{d}. `{s}` (`{s}`)", .{
                 call_index + 1,
                 call.name,
                 call.id,
-                call.arguments,
             });
+            if (arg_summary.len > 0) try out.writer.print(" -> {s}", .{arg_summary});
+            try out.writer.writeAll("\n\n");
         }
     }
     if (msg.tool_calls.len > 0 or msg.tool_name != null or msg.tool_call_id != null) {
@@ -491,6 +625,97 @@ fn shortcutReuseText(allocator: std.mem.Allocator, label: []const u8) !?[]u8 {
     return try allocator.dupe(u8, label[prefix.len..]);
 }
 
+fn collectRepoPaths(
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    expanded_paths: []const []const u8,
+    limit: usize,
+) ![][]u8 {
+    var out = std.ArrayList([]u8).empty;
+    defer out.deinit(allocator);
+    try appendRepoChildren(allocator, &out, root_path, "", expanded_paths, limit);
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendRepoChildren(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList([]u8),
+    absolute_dir_path: []const u8,
+    relative_prefix: []const u8,
+    expanded_paths: []const []const u8,
+    limit: usize,
+) !void {
+    if (out.items.len >= limit) return;
+
+    var dir = try std.fs.openDirAbsolute(absolute_dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    var listed = std.ArrayList(RepoDirItem).empty;
+    defer {
+        for (listed.items) |item| allocator.free(item.name);
+        listed.deinit(allocator);
+    }
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (std.mem.eql(u8, entry.name, ".git")) continue;
+        if (entry.kind != .directory and entry.kind != .file) continue;
+        try listed.append(allocator, .{
+            .name = try allocator.dupe(u8, entry.name),
+            .is_dir = entry.kind == .directory,
+        });
+    }
+
+    std.mem.sort(RepoDirItem, listed.items, {}, repoDirLessThan);
+
+    for (listed.items) |item| {
+        if (out.items.len >= limit) break;
+
+        const relative_path = if (relative_prefix.len == 0)
+            try allocator.dupe(u8, item.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_prefix, item.name });
+        defer allocator.free(relative_path);
+
+        const display_path = if (item.is_dir)
+            try std.fmt.allocPrint(allocator, "{s}/", .{relative_path})
+        else
+            try allocator.dupe(u8, relative_path);
+        try out.append(allocator, display_path);
+
+        if (!item.is_dir or !repoPathIsExpanded(expanded_paths, relative_path)) continue;
+
+        const child_absolute = try std.fs.path.join(allocator, &.{ absolute_dir_path, item.name });
+        defer allocator.free(child_absolute);
+        try appendRepoChildren(allocator, out, child_absolute, relative_path, expanded_paths, limit);
+    }
+}
+
+fn repoDirLessThan(_: void, lhs: RepoDirItem, rhs: RepoDirItem) bool {
+    if (lhs.is_dir != rhs.is_dir) return lhs.is_dir;
+    return std.ascii.lessThanIgnoreCase(lhs.name, rhs.name);
+}
+
+fn repoPathIsExpanded(expanded_paths: []const []const u8, candidate: []const u8) bool {
+    for (expanded_paths) |path| {
+        if (std.mem.eql(u8, path, candidate)) return true;
+    }
+    return false;
+}
+
+fn repoLabelFromPath(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[slash + 1 ..];
+}
+
+fn repoPathDepth(path: []const u8) usize {
+    var depth: usize = 0;
+    for (path) |byte| {
+        if (byte == '/') depth += 1;
+    }
+    return depth;
+}
+
 pub fn actionReuseText(allocator: std.mem.Allocator, action: []const u8) !?[]u8 {
     const prefix = "run: ";
     if (!std.mem.startsWith(u8, action, prefix)) return null;
@@ -503,4 +728,63 @@ pub fn outputReuseText(allocator: std.mem.Allocator, line: []const u8) !?[]u8 {
     if (trimmed[0] == '/') return try allocator.dupe(u8, trimmed);
     if (std.mem.startsWith(u8, trimmed, "[tool] ")) return null;
     return null;
+}
+
+fn summarizeToolArguments(allocator: std.mem.Allocator, raw_args: []const u8) ![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw_args, .{}) catch {
+        return try allocator.dupe(u8, ziggy.FormatText.previewText(raw_args, 64));
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return try allocator.dupe(u8, ziggy.FormatText.previewText(raw_args, 64));
+
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var writer = out.writer(allocator);
+
+    const preferred = [_][]const u8{ "path", "url", "query", "pattern", "command", "name", "branch" };
+    var wrote_any = false;
+    for (preferred) |key| {
+        const value = parsed.value.object.get(key) orelse continue;
+        if (wrote_any) try writer.writeAll(", ");
+        wrote_any = true;
+        try writer.print("{s}=", .{key});
+        switch (value) {
+            .string => |text| try writer.writeAll(ziggy.FormatText.previewText(text, 48)),
+            .integer => |n| try writer.print("{d}", .{n}),
+            .float => |n| try writer.print("{d}", .{n}),
+            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+            else => try writer.writeAll("<value>"),
+        }
+    }
+
+    if (parsed.value.object.get("content")) |content| {
+        if (content == .string) {
+            if (wrote_any) try writer.writeAll(", ");
+            wrote_any = true;
+            try writer.print("content=<{d} chars>", .{content.string.len});
+        }
+    }
+    if (parsed.value.object.get("old_text")) |old_text| {
+        if (old_text == .string) {
+            if (wrote_any) try writer.writeAll(", ");
+            wrote_any = true;
+            try writer.print("old_text=<{d} chars>", .{old_text.string.len});
+        }
+    }
+    if (parsed.value.object.get("new_text")) |new_text| {
+        if (new_text == .string) {
+            if (wrote_any) try writer.writeAll(", ");
+            wrote_any = true;
+            try writer.print("new_text=<{d} chars>", .{new_text.string.len});
+        }
+    }
+
+    if (!wrote_any) return try allocator.dupe(u8, "<arguments>");
+    return out.toOwnedSlice(allocator);
+}
+
+fn previewToolResult(result: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, result, " \r\n\t");
+    if (trimmed.len == 0) return "<empty>";
+    return ziggy.FormatText.previewText(trimmed, 120);
 }

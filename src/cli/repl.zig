@@ -65,6 +65,26 @@ pub fn runInteractive(app: *App) !void {
             else => return err,
         };
         if (handled) {
+            if (app.takePendingInjectedPrompt()) |rendered| {
+                defer app.allocator.free(rendered);
+                runPromptLine(app, rendered, stdout, stdin, true) catch |err| {
+                    try printRuntimeError(app, stdout, err);
+                };
+            }
+            continue;
+        }
+
+        if (try commands.tryBareSkillInvocation(app, line, .{
+            .stdout = stdout,
+            .stdin = stdin,
+            .interactive = true,
+        })) {
+            if (app.takePendingInjectedPrompt()) |rendered| {
+                defer app.allocator.free(rendered);
+                runPromptLine(app, rendered, stdout, stdin, true) catch |err| {
+                    try printRuntimeError(app, stdout, err);
+                };
+            }
             continue;
         }
 
@@ -79,6 +99,41 @@ pub fn runSingleShot(app: *App, prompt: []const u8) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &stdout_writer.interface;
+    if (prompt.len > 0 and prompt[0] == '/') {
+        const handled = commands.handle(app, prompt, .{
+            .stdout = stdout,
+            .stdin = null,
+            .interactive = false,
+        }) catch |err| switch (err) {
+            commands.CommandError.ExitRequested => return,
+            else => return err,
+        };
+        if (handled) {
+            if (app.takePendingInjectedPrompt()) |rendered| {
+                defer app.allocator.free(rendered);
+                runPromptLine(app, rendered, stdout, null, false) catch |err| {
+                    try printRuntimeError(app, stdout, err);
+                    return err;
+                };
+                return;
+            }
+            return;
+        }
+    }
+    if (try commands.tryBareSkillInvocation(app, prompt, .{
+        .stdout = stdout,
+        .stdin = null,
+        .interactive = false,
+    })) {
+        if (app.takePendingInjectedPrompt()) |rendered| {
+            defer app.allocator.free(rendered);
+            runPromptLine(app, rendered, stdout, null, false) catch |err| {
+                try printRuntimeError(app, stdout, err);
+                return err;
+            };
+        }
+        return;
+    }
     runPromptLine(app, prompt, stdout, null, false) catch |err| {
         try printRuntimeError(app, stdout, err);
         return err;

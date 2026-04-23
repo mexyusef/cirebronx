@@ -7,6 +7,20 @@ const path_util = @import("../util/paths.zig");
 const random_util = @import("../util/random.zig");
 
 pub const App = struct {
+    pub const Subagent = struct {
+        id: []u8,
+        target: []u8,
+        prompt: []u8,
+        status: []u8,
+
+        pub fn deinit(self: *Subagent, allocator: std.mem.Allocator) void {
+            allocator.free(self.id);
+            allocator.free(self.target);
+            allocator.free(self.prompt);
+            allocator.free(self.status);
+        }
+    };
+
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     config: config_mod.Config,
@@ -16,6 +30,9 @@ pub const App = struct {
     permissions: permissions_mod.PermissionSet,
     plan_mode: bool,
     last_provider_error: ?[]u8,
+    pending_injected_prompt: ?[]u8,
+    subagents: std.ArrayList(Subagent),
+    next_subagent_id: usize,
 
     pub fn init(allocator: std.mem.Allocator) !App {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -35,15 +52,21 @@ pub const App = struct {
             .permissions = .{},
             .plan_mode = false,
             .last_provider_error = null,
+            .pending_injected_prompt = null,
+            .subagents = .empty,
+            .next_subagent_id = 1,
         };
     }
 
     pub fn deinit(self: *App) void {
         for (self.session.items) |*msg| msg.deinit(self.allocator);
         self.session.deinit(self.allocator);
+        for (self.subagents.items) |*agent| agent.deinit(self.allocator);
+        self.subagents.deinit(self.allocator);
         self.allocator.free(self.session_id);
         self.allocator.free(self.cwd);
         if (self.last_provider_error) |text| self.allocator.free(text);
+        if (self.pending_injected_prompt) |text| self.allocator.free(text);
         self.config.deinit(self.allocator);
         self.arena.deinit();
     }
@@ -56,6 +79,22 @@ pub const App = struct {
     pub fn clearLastProviderError(self: *App) void {
         if (self.last_provider_error) |text| self.allocator.free(text);
         self.last_provider_error = null;
+    }
+
+    pub fn setPendingInjectedPrompt(self: *App, text: []const u8) !void {
+        self.clearPendingInjectedPrompt();
+        self.pending_injected_prompt = try self.allocator.dupe(u8, text);
+    }
+
+    pub fn takePendingInjectedPrompt(self: *App) ?[]u8 {
+        const text = self.pending_injected_prompt;
+        self.pending_injected_prompt = null;
+        return text;
+    }
+
+    pub fn clearPendingInjectedPrompt(self: *App) void {
+        if (self.pending_injected_prompt) |text| self.allocator.free(text);
+        self.pending_injected_prompt = null;
     }
 
     pub fn appendMessage(self: *App, msg: message_mod.MessageView) !void {
@@ -205,5 +244,34 @@ pub const App = struct {
         self.clearSession();
         self.session = next;
         return true;
+    }
+
+    pub fn createSubagent(self: *App, target: []const u8, prompt: []const u8) ![]const u8 {
+        const id = try std.fmt.allocPrint(self.allocator, "agent-{d}", .{self.next_subagent_id});
+        self.next_subagent_id += 1;
+        try self.subagents.append(self.allocator, .{
+            .id = id,
+            .target = try self.allocator.dupe(u8, target),
+            .prompt = try self.allocator.dupe(u8, prompt),
+            .status = try self.allocator.dupe(u8, "planned"),
+        });
+        return id;
+    }
+
+    pub fn findSubagent(self: *App, id: []const u8) ?*Subagent {
+        for (self.subagents.items) |*agent| {
+            if (std.mem.eql(u8, agent.id, id)) return agent;
+        }
+        return null;
+    }
+
+    pub fn removeSubagent(self: *App, id: []const u8) bool {
+        for (self.subagents.items, 0..) |*agent, index| {
+            if (!std.mem.eql(u8, agent.id, id)) continue;
+            agent.deinit(self.allocator);
+            _ = self.subagents.orderedRemove(index);
+            return true;
+        }
+        return false;
     }
 };

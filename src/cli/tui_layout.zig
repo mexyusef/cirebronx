@@ -42,8 +42,13 @@ pub fn leftPaneWidth(size: ziggy.Size) usize {
     return left;
 }
 
+pub fn rightPaneWidth(size: ziggy.Size) usize {
+    return @as(usize, size.width) -| leftPaneWidth(size) -| 1;
+}
+
 pub fn conversationBodyWidth(size: ziggy.Size) usize {
-    return @as(usize, size.width) -| 4;
+    const rect = conversationRect(size);
+    return rect.width -| 3;
 }
 
 pub fn conversationBodyVisibleHeight(size: ziggy.Size) usize {
@@ -62,7 +67,7 @@ pub fn conversationRect(size: ziggy.Size) ziggy.Rect {
     return .{
         .x = 0,
         .y = 0,
-        .width = size.width,
+        .width = @intCast(leftPaneWidth(size)),
         .height = @intCast(mainTopHeight(size)),
     };
 }
@@ -88,11 +93,13 @@ pub fn conversationContentRect(size: ziggy.Size) ziggy.Rect {
 }
 
 pub fn activityRect(size: ziggy.Size) ziggy.Rect {
+    const right = rightColumnRect(size);
+    const top_height = rightColumnTopHeight(size);
     return .{
-        .x = size.width,
-        .y = 0,
-        .width = 0,
-        .height = @intCast(mainTopHeight(size)),
+        .x = right.x,
+        .y = right.y,
+        .width = right.width,
+        .height = @intCast(top_height),
     };
 }
 
@@ -112,6 +119,100 @@ pub fn activityContentRect(size: ziggy.Size) ziggy.Rect {
         .x = rect.x + 1,
         .y = rect.y + 1,
         .width = rect.width -| 3,
+        .height = rect.height -| 2,
+    };
+}
+
+pub fn rightColumnRect(size: ziggy.Size) ziggy.Rect {
+    const left_width: u16 = @intCast(leftPaneWidth(size));
+    return .{
+        .x = left_width + 1,
+        .y = 0,
+        .width = @intCast(rightPaneWidth(size)),
+        .height = @intCast(mainTopHeight(size)),
+    };
+}
+
+pub fn rightColumnTopHeight(size: ziggy.Size) usize {
+    const total = mainTopHeight(size);
+    return @max((total * 3) / 5, 6);
+}
+
+pub fn rightColumnBottomHeight(size: ziggy.Size) usize {
+    const total = mainTopHeight(size);
+    const top = rightColumnTopHeight(size);
+    return total -| top -| 1;
+}
+
+pub fn utilityRect(size: ziggy.Size) ziggy.Rect {
+    const right = rightColumnRect(size);
+    const top_height = @as(u16, @intCast(rightColumnTopHeight(size)));
+    return .{
+        .x = right.x,
+        .y = right.y + top_height + 1,
+        .width = right.width,
+        .height = @intCast(rightColumnBottomHeight(size)),
+    };
+}
+
+pub fn inspectorRect(size: ziggy.Size) ziggy.Rect {
+    const utility = utilityRect(size);
+    const top_height = @max((@as(usize, utility.height) * 3) / 5, 4);
+    return .{
+        .x = utility.x,
+        .y = utility.y,
+        .width = utility.width,
+        .height = @intCast(top_height),
+    };
+}
+
+pub fn repoRect(size: ziggy.Size) ziggy.Rect {
+    const utility = utilityRect(size);
+    const inspector = inspectorRect(size);
+    return .{
+        .x = utility.x,
+        .y = inspector.y + inspector.height + 1,
+        .width = utility.width,
+        .height = utility.height -| inspector.height -| 1,
+    };
+}
+
+pub fn repoContentRect(size: ziggy.Size) ziggy.Rect {
+    const rect = repoRect(size);
+    return .{
+        .x = rect.x + 1,
+        .y = rect.y + 1,
+        .width = rect.width -| 3,
+        .height = rect.height -| 2,
+    };
+}
+
+pub fn repoScrollbarRect(size: ziggy.Size) ziggy.Rect {
+    const rect = repoRect(size);
+    return .{
+        .x = rect.x +| rect.width -| 1,
+        .y = rect.y + 1,
+        .width = 1,
+        .height = rect.height -| 2,
+    };
+}
+
+pub fn inspectorContentRect(size: ziggy.Size) ziggy.Rect {
+    const rect = inspectorRect(size);
+    return .{
+        .x = rect.x + 1,
+        .y = rect.y + 1,
+        .width = rect.width -| 3,
+        .height = rect.height -| 2,
+    };
+}
+
+pub fn inspectorScrollbarRect(size: ziggy.Size) ziggy.Rect {
+    const rect = inspectorRect(size);
+    return .{
+        .x = rect.x +| rect.width -| 1,
+        .y = rect.y + 1,
+        .width = 1,
         .height = rect.height -| 2,
     };
 }
@@ -183,9 +284,11 @@ test "pane content rects reserve room for borders and scrollbars" {
 
     try std.testing.expect(conversation_content.width < conversation.width);
     try std.testing.expectEqual(conversation_scrollbar.x, conversation.x + conversation.width - 1);
-    try std.testing.expectEqual(@as(u16, 0), activity.width);
-    try std.testing.expectEqual(@as(u16, 0), activity_content.width);
-    try std.testing.expectEqual(activity_scrollbar.x, activity.x + activity.width -| 1);
+    try std.testing.expect(activity.width > 0);
+    try std.testing.expect(activity_content.width < activity.width);
+    try std.testing.expectEqual(activity_scrollbar.x, activity.x + activity.width - 1);
+    try std.testing.expect(repoRect(size).height > 0);
+    try std.testing.expect(repoContentRect(size).width < repoRect(size).width);
 }
 
 test "input content rect stays inside input rect" {

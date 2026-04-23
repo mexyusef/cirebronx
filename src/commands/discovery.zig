@@ -1,12 +1,12 @@
 const std = @import("std");
 
-pub const SkillInfo = struct {
+pub const CommandInfo = struct {
     name: []u8,
     path: []u8,
     summary: []u8,
     source: []u8,
 
-    pub fn deinit(self: *SkillInfo, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *CommandInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.path);
         allocator.free(self.summary);
@@ -14,19 +14,25 @@ pub const SkillInfo = struct {
     }
 };
 
-pub const LoadedSkill = struct {
-    info: SkillInfo,
+pub const LoadedCommand = struct {
+    info: CommandInfo,
     body: []u8,
 
-    pub fn deinit(self: *LoadedSkill, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *LoadedCommand, allocator: std.mem.Allocator) void {
         self.info.deinit(allocator);
         allocator.free(self.body);
     }
 };
 
-pub fn discover(allocator: std.mem.Allocator) ![]SkillInfo {
-    var list: std.ArrayList(SkillInfo) = .empty;
+const Root = struct {
+    path: []u8,
+    label: []const u8,
+};
+
+pub fn discover(allocator: std.mem.Allocator) ![]CommandInfo {
+    var list: std.ArrayList(CommandInfo) = .empty;
     defer list.deinit(allocator);
+
     const roots = try discoverRoots(allocator);
     defer freeRoots(allocator, roots);
 
@@ -42,27 +48,24 @@ pub fn discover(allocator: std.mem.Allocator) ![]SkillInfo {
 
         while (try walker.next()) |entry| {
             if (entry.kind != .file) continue;
-            if (!std.mem.eql(u8, entry.basename, "SKILL.md")) continue;
+            if (!isCommandFile(entry.path)) continue;
 
             const full_path = try std.fs.path.join(allocator, &.{ root.path, entry.path });
             errdefer allocator.free(full_path);
+            if (containsCommand(list.items, full_path)) {
+                allocator.free(full_path);
+                continue;
+            }
+
             const content = readFileAlloc(allocator, full_path, 64 * 1024) catch {
                 allocator.free(full_path);
                 continue;
             };
             defer allocator.free(content);
-            const parsed = parseSkillFile(content);
+            const parsed = parseCommandFile(content);
 
-            const skill_name = if (parsed.name.len > 0)
-                parsed.name
-            else
-                std.fs.path.basename(std.fs.path.dirname(entry.path) orelse entry.path);
-            if (containsSkill(list.items, full_path)) {
-                allocator.free(full_path);
-                continue;
-            }
             try list.append(allocator, .{
-                .name = try allocator.dupe(u8, skill_name),
+                .name = try buildCommandName(allocator, entry.path),
                 .path = full_path,
                 .summary = try allocator.dupe(u8, parsed.summary),
                 .source = try allocator.dupe(u8, root.label),
@@ -73,25 +76,25 @@ pub fn discover(allocator: std.mem.Allocator) ![]SkillInfo {
     return try list.toOwnedSlice(allocator);
 }
 
-pub fn loadByName(allocator: std.mem.Allocator, requested: []const u8) !?LoadedSkill {
-    const normalized = std.mem.trim(u8, std.mem.trimLeft(u8, requested, "/$"), " \r\t");
+pub fn loadByName(allocator: std.mem.Allocator, requested: []const u8) !?LoadedCommand {
+    const normalized = std.mem.trimLeft(u8, requested, "/");
     const found = try discover(allocator);
     defer {
-        for (found) |*skill| skill.deinit(allocator);
+        for (found) |*command| command.deinit(allocator);
         allocator.free(found);
     }
 
-    for (found) |skill| {
-        if (!std.mem.eql(u8, skill.name, normalized)) continue;
-        const content = try readFileAlloc(allocator, skill.path, 256 * 1024);
+    for (found) |command| {
+        if (!std.mem.eql(u8, command.name, normalized)) continue;
+        const content = try readFileAlloc(allocator, command.path, 256 * 1024);
         errdefer allocator.free(content);
-        const parsed = parseSkillFile(content);
-        const loaded = LoadedSkill{
+        const parsed = parseCommandFile(content);
+        const loaded = LoadedCommand{
             .info = .{
-                .name = try allocator.dupe(u8, skill.name),
-                .path = try allocator.dupe(u8, skill.path),
-                .summary = try allocator.dupe(u8, skill.summary),
-                .source = try allocator.dupe(u8, skill.source),
+                .name = try allocator.dupe(u8, command.name),
+                .path = try allocator.dupe(u8, command.path),
+                .summary = try allocator.dupe(u8, command.summary),
+                .source = try allocator.dupe(u8, command.source),
             },
             .body = try allocator.dupe(u8, parsed.body),
         };
@@ -103,40 +106,42 @@ pub fn loadByName(allocator: std.mem.Allocator, requested: []const u8) !?LoadedS
 }
 
 pub fn renderPrompt(allocator: std.mem.Allocator, body: []const u8, arguments: []const u8) ![]u8 {
-    const args = std.mem.trim(u8, arguments, " \r\t");
-    if (args.len == 0) return try allocator.dupe(u8, body);
-    return try std.fmt.allocPrint(
-        allocator,
-        "{s}\n\nUser request for this skill:\n{s}\n",
-        .{ body, args },
-    );
-}
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
 
-const Root = struct {
-    path: []u8,
-    label: []const u8,
-};
+    var cursor: usize = 0;
+    while (cursor < body.len) {
+        if (std.mem.startsWith(u8, body[cursor..], "$ARGUMENTS")) {
+            try out.appendSlice(allocator, arguments);
+            cursor += "$ARGUMENTS".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, body[cursor..], "{{ARGUMENTS}}")) {
+            try out.appendSlice(allocator, arguments);
+            cursor += "{{ARGUMENTS}}".len;
+            continue;
+        }
+        try out.append(allocator, body[cursor]);
+        cursor += 1;
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
 
 fn discoverRoots(allocator: std.mem.Allocator) ![]Root {
     var roots: std.ArrayList(Root) = .empty;
     defer roots.deinit(allocator);
 
-    if (std.process.getEnvVarOwned(allocator, "CODEX_HOME")) |codex_home| {
-        defer allocator.free(codex_home);
-        const root = try std.fs.path.join(allocator, &.{ codex_home, "skills" });
-        try appendRoot(allocator, &roots, root, "codex_home");
-    } else |_| {}
-
-    if (try homeCandidates(allocator)) |home| {
+    if (try homeCandidate(allocator)) |home| {
         defer allocator.free(home);
-        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ home, ".codex", "skills" }), "~/.codex");
-        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ home, ".claude", "skills" }), "~/.claude");
+        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ home, ".codex", "commands" }), "~/.codex");
+        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ home, ".claude", "commands" }), "~/.claude");
     }
 
     if (try cwdCandidate(allocator)) |cwd| {
         defer allocator.free(cwd);
-        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ cwd, ".codex", "skills" }), "./.codex");
-        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ cwd, ".claude", "skills" }), "./.claude");
+        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ cwd, ".codex", "commands" }), "./.codex");
+        try appendRoot(allocator, &roots, try std.fs.path.join(allocator, &.{ cwd, ".claude", "commands" }), "./.claude");
     }
 
     return try roots.toOwnedSlice(allocator);
@@ -166,7 +171,7 @@ fn freeRoots(allocator: std.mem.Allocator, roots: []Root) void {
     allocator.free(roots);
 }
 
-fn homeCandidates(allocator: std.mem.Allocator) !?[]u8 {
+fn homeCandidate(allocator: std.mem.Allocator) !?[]u8 {
     if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |profile| {
         return profile;
     } else |_| {}
@@ -177,30 +182,42 @@ fn homeCandidates(allocator: std.mem.Allocator) !?[]u8 {
 }
 
 fn cwdCandidate(allocator: std.mem.Allocator) !?[]u8 {
-    const cwd = std.fs.cwd().realpathAlloc(allocator, ".") catch return null;
-    return cwd;
+    return std.fs.cwd().realpathAlloc(allocator, ".") catch null;
 }
 
-fn containsSkill(found: []const SkillInfo, path: []const u8) bool {
-    for (found) |skill| {
-        if (std.mem.eql(u8, skill.path, path)) return true;
+fn containsCommand(found: []const CommandInfo, path: []const u8) bool {
+    for (found) |command| {
+        if (std.mem.eql(u8, command.path, path)) return true;
     }
     return false;
 }
 
-const ParsedSkillFile = struct {
-    name: []const u8,
+fn isCommandFile(path: []const u8) bool {
+    const ext = std.fs.path.extension(path);
+    return std.mem.eql(u8, ext, ".md") or std.mem.eql(u8, ext, ".txt") or std.mem.eql(u8, ext, ".prompt");
+}
+
+fn buildCommandName(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const ext = std.fs.path.extension(path);
+    const stem = path[0 .. path.len - ext.len];
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    for (stem) |char| {
+        try out.append(allocator, if (char == '\\') '/' else char);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+const ParsedCommandFile = struct {
     summary: []const u8,
     body: []const u8,
 };
 
-fn parseSkillFile(content: []const u8) ParsedSkillFile {
+fn parseCommandFile(content: []const u8) ParsedCommandFile {
     const split = splitFrontmatter(content);
-    const name = extractFrontmatterValue(split.frontmatter, "name");
     const description = extractFrontmatterValue(split.frontmatter, "description");
     const summary = if (description.len > 0) description else extractSummary(split.body);
     return .{
-        .name = name,
         .summary = summary,
         .body = std.mem.trim(u8, split.body, "\r\n"),
     };
@@ -218,8 +235,9 @@ fn splitFrontmatter(content: []const u8) FrontmatterSplit {
         "---\n".len
     else
         0;
-    if (prefix_len == 0) return .{ .frontmatter = "", .body = content };
-
+    if (prefix_len == 0) {
+        return .{ .frontmatter = "", .body = content };
+    }
     const rest = content[prefix_len..];
     const end_marker = if (std.mem.indexOf(u8, rest, "\r\n---\r\n") != null)
         "\r\n---\r\n"
@@ -261,33 +279,52 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8, limit: usize) !
     return try file.readToEndAlloc(allocator, limit);
 }
 
+test "buildCommandName keeps nested command paths" {
+    const name = try buildCommandName(std.testing.allocator, "blog\\idea.md");
+    defer std.testing.allocator.free(name);
+    try std.testing.expectEqualStrings("blog/idea", name);
+}
+
 test "extractSummary skips markdown markers" {
     const summary = extractSummary(
-        \\# Skill Name
+        \\# Bootstrap
         \\
-        \\Use this skill for repo work.
+        \\Create a starter project plan.
     );
-    try std.testing.expectEqualStrings("Skill Name", summary);
+    try std.testing.expectEqualStrings("Bootstrap", summary);
 }
 
-test "parseSkillFile prefers frontmatter metadata" {
-    const parsed = parseSkillFile(
+test "parseCommandFile prefers frontmatter description and strips header" {
+    const parsed = parseCommandFile(
         \\---
-        \\name: repo-audit
-        \\description: Audit a repository for risks
+        \\description: Bootstrap project
+        \\argument-hint: <idea>
         \\---
         \\
-        \\# Repo Audit
-        \\Read the codebase first.
+        \\# Bootstrap
+        \\Use $ARGUMENTS here.
     );
-    try std.testing.expectEqualStrings("repo-audit", parsed.name);
-    try std.testing.expectEqualStrings("Audit a repository for risks", parsed.summary);
-    try std.testing.expect(std.mem.indexOf(u8, parsed.body, "Read the codebase first.") != null);
+    try std.testing.expectEqualStrings("Bootstrap project", parsed.summary);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.body, "Use $ARGUMENTS here.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.body, "description:") == null);
 }
 
-test "renderPrompt appends user request" {
-    const rendered = try renderPrompt(std.testing.allocator, "Skill body", "inspect auth");
+test "parseCommandFile supports CRLF frontmatter" {
+    const parsed = parseCommandFile(
+        "---\r\n" ++
+        "description: Django backend API helper\r\n" ++
+        "allowed-tools: SlashCommand, Bash\r\n" ++
+        "---\r\n" ++
+        "\r\n" ++
+        "# Build API\r\n" ++
+        "Do the work.\r\n"
+    );
+    try std.testing.expectEqualStrings("Django backend API helper", parsed.summary);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.body, "Do the work.") != null);
+}
+
+test "renderPrompt replaces argument placeholders" {
+    const rendered = try renderPrompt(std.testing.allocator, "hello $ARGUMENTS and {{ARGUMENTS}}", "world");
     defer std.testing.allocator.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "Skill body") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "inspect auth") != null);
+    try std.testing.expectEqualStrings("hello world and world", rendered);
 }

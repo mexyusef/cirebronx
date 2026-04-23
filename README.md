@@ -1,38 +1,54 @@
 # cirebronx
 
-`cirebronx` is a Zig terminal coding agent inspired by Claude Code style workflows, with both a plain CLI and a pane-based TUI.
+`cirebronx` is a Zig-based terminal coding agent with both a direct CLI and a pane-based TUI built on top of `ziggy`.
+
+It is aimed at local agentic coding workflows: prompt execution, tool use, file edits, shell actions, repo search, sessions, slash commands, skills, and MCP-aware extension points.
 
 Open-source home: `https://github.com/mexyusef/cirebronx`
 
-## Status
+![cirebronx screenshot](docs/screenshot.png)
 
-This project is experimental and under active restructuring. It is useful for local testing, but the tool surface, provider adapters, and interaction model may change quickly.
+## Features
 
-## Highlights
-
-- Interactive REPL, one-shot prompt mode, and `--tui` interface
-- OpenAI-compatible, Gemini-compatible, and Anthropic provider paths
-- Tool loop with file, grep, shell, and edit operations
-- Local skills, plugin manifest discovery, MCP registry, and session resume support
-- Permission gating for read, write, and shell operations
+- Terminal-first coding agent with one-shot, REPL, and TUI modes
+- Multi-provider support:
+  - `openai`
+  - `openrouter`
+  - `anthropic`
+  - `gemini`
+  - `groq`
+  - `cerebras`
+  - `huggingface`
+- Built-in tools for filesystem, shell, search, patching, web fetch, and web search
+- Slash-command surface for provider, model, theme, tools, sessions, skills, commands, and MCP workflows
+- Discovery of local command and skill inventories from `~/.claude` and `~/.codex`
+- Theme-aware TUI with modal help, picker overlays, right sidebar toggle, and clipboard support
+- Session persistence, prompt history, and resumable interactive work
 
 ## Requirements
 
 - Zig `0.15.2`
 - A sibling checkout of `ziggy` at `../ziggy`
-- Provider credentials through environment variables
+- Provider credentials in environment variables, or an OpenRouter key pool when using the OpenRouter fallback path
 
-## Build And Run
+## Build
 
 ```powershell
 zig build test
 zig build
-zig build run
-zig build run -- --tui
-zig build run -- "inspect this repo"
 ```
 
-## Provider Examples
+## Run
+
+```powershell
+zig build run
+zig build run -- --tui
+zig build run -- "inspect this repository"
+```
+
+## Provider Setup
+
+Example: Gemini
 
 ```powershell
 $env:CIREBRONX_PROVIDER='gemini'
@@ -41,6 +57,8 @@ $env:OPENAI_MODEL='gemini-2.5-flash'
 zig build run -- "hello"
 ```
 
+Example: Anthropic
+
 ```powershell
 $env:CIREBRONX_PROVIDER='anthropic'
 $env:ANTHROPIC_API_KEY='...'
@@ -48,21 +66,42 @@ $env:OPENAI_MODEL='claude-sonnet-4-20250514'
 zig build run -- "hello"
 ```
 
-## Helper Launchers
+Example: OpenRouter
 
-- `run-gemini.bat`
-- `run-gemini.ps1`
+```powershell
+$env:CIREBRONX_PROVIDER='openrouter'
+$env:OPENAI_API_KEY='...'
+zig build run -- "hello"
+```
 
-## Notes
+## TUI Notes
 
-- `--tui` depends on the local `ziggy` checkout because `build.zig` imports `../ziggy/src/ziggy.zig`.
-- This repository currently favors local experimentation over stable release packaging.
+- `Ctrl+H` opens the embedded help modal
+- `Ctrl+B` toggles the right sidebar
+- `Ctrl+Y` copies the focused pane or modal content
+- `Ctrl+X` quits
+- `/` opens the slash-command palette
+
+## Local Discovery
+
+`cirebronx` can discover local assets from:
+
+- `%USERPROFILE%\.claude\commands`
+- `%USERPROFILE%\.claude\skills`
+- `%USERPROFILE%\.codex\commands`
+- `%USERPROFILE%\.codex\skills`
+- project-local `./.claude/*`
+- project-local `./.codex/*`
+
+## Project Status
+
+The project is usable for local experimentation and active development, but it is still evolving quickly. Provider behavior, tool routing, and TUI interactions are under active refinement.
 
 ## Related Repositories
 
-- `ziggy`: terminal UI library used by the TUI mode
+- `ziggy`: terminal UI library used by the TUI
 - `fmus-zig`: shared utility layer
-- `zigsaw`: adjacent agent/runtime work
+- `zigsaw`: adjacent runtime and agent work
 
 ## License
 

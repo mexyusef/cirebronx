@@ -8,6 +8,7 @@ const commands = @import("commands/registry.zig");
 const permissions_mod = @import("core/permissions.zig");
 const provider_adapter = @import("provider/adapter.zig");
 const anthropic_provider = @import("provider/anthropic_client.zig");
+const openrouter_pool = @import("provider/openrouter_pool.zig");
 const provider_types = @import("provider/types.zig");
 const mcp_client = @import("mcp/client.zig");
 const config_mod = @import("storage/config.zig");
@@ -22,6 +23,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    defer openrouter_pool.deinitGlobal(allocator);
 
     const parsed = try cli.parseArgs(allocator);
     defer parsed.deinit(allocator);

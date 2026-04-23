@@ -41,8 +41,15 @@ pub const PromptHistory = struct {
 };
 
 pub const ModalState = struct {
+    pub const Kind = enum {
+        generic,
+        help,
+    };
+
     title: ?[]u8 = null,
     body: ?[]u8 = null,
+    kind: Kind = .generic,
+    scroll: usize = 0,
 
     pub fn deinit(self: *ModalState, allocator: std.mem.Allocator) void {
         if (self.title) |title| allocator.free(title);
@@ -57,12 +64,21 @@ pub const ModalState = struct {
         self.deinit(allocator);
         self.title = null;
         self.body = null;
+        self.kind = .generic;
+        self.scroll = 0;
     }
 
     pub fn open(self: *ModalState, allocator: std.mem.Allocator, title: []const u8, body: []const u8) !void {
         self.close(allocator);
         self.title = try allocator.dupe(u8, title);
         self.body = try allocator.dupe(u8, body);
+        self.kind = .generic;
+        self.scroll = 0;
+    }
+
+    pub fn openWithKind(self: *ModalState, allocator: std.mem.Allocator, title: []const u8, body: []const u8, kind: Kind) !void {
+        try self.open(allocator, title, body);
+        self.kind = kind;
     }
 };
 

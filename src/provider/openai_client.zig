@@ -5,6 +5,8 @@ const App = @import("../core/app.zig").App;
 const message_mod = @import("../core/message.zig");
 const tool_base = @import("../tools/base.zig");
 const provider_types = @import("types.zig");
+const openrouter_pool = @import("openrouter_pool.zig");
+const provider_prompt = @import("prompt.zig");
 
 const client_headers = [_]std.http.Header{
     .{ .name = "x-goog-api-client", .value = "cirebronx/0.1.0" },
@@ -90,7 +92,12 @@ pub fn sendTurn(app: *App, tools: []const tool_base.ToolSpec) !TurnResult {
 
 pub fn sendTurnObserved(app: *App, tools: []const tool_base.ToolSpec, observer: TurnObserver) !TurnResult {
     app.clearLastProviderError();
-    if (app.config.api_key.len == 0) {
+    const openrouter_attempts = if (isOpenRouterBaseUrl(app.config.base_url))
+        @max(openrouter_pool.keyCount(app.allocator), 1)
+    else
+        1;
+
+    if (openrouter_attempts == 0 and app.config.api_key.len == 0) {
         try app.setLastProviderError("Missing API key");
         return error.MissingApiKey;
     }
@@ -107,75 +114,84 @@ pub fn sendTurnObserved(app: *App, tools: []const tool_base.ToolSpec, observer: 
     defer client.deinit();
 
     const uri = try std.Uri.parse(app.config.base_url);
-    const auth_header = try std.fmt.allocPrint(app.allocator, "Bearer {s}", .{app.config.api_key});
-    defer app.allocator.free(auth_header);
-
-    var request = try client.request(.POST, uri, .{
-        .headers = .{
-            .content_type = .{ .override = "application/json" },
-            .authorization = .{ .override = auth_header },
-        },
-        .extra_headers = &client_headers,
-    });
-    defer request.deinit();
-
-    request.transfer_encoding = .{ .content_length = body.len };
-    var body_writer = try request.sendBodyUnflushed(&.{});
-    try body_writer.writer.writeAll(body);
-    try body_writer.end();
-    try request.connection.?.flush();
-
-    var response = try request.receiveHead(&.{});
-    if (response.head.status != .ok) {
-        var transfer_buffer_error: [16 * 1024]u8 = undefined;
-        var error_reader = response.reader(&transfer_buffer_error);
-        var error_body_writer: std.Io.Writer.Allocating = .init(app.allocator);
-        defer error_body_writer.deinit();
-        _ = error_reader.streamRemaining(&error_body_writer.writer) catch 0;
-        const decoded_error = try decodeHttpBody(app.allocator, error_body_writer.written());
-        defer app.allocator.free(decoded_error);
-        if (tools.len > 0 and std.mem.eql(u8, app.config.provider, "gemini") and response.head.status == .too_many_requests) {
-            try observer.status("provider retry without tools");
-            return sendTurnObserved(app, &.{}, observer);
+    var attempt: usize = 0;
+    while (attempt < openrouter_attempts) : (attempt += 1) {
+        const request_api_key = try requestApiKey(app.allocator, app.config.base_url, app.config.api_key);
+        defer if (request_api_key.ptr != app.config.api_key.ptr) app.allocator.free(request_api_key);
+        if (request_api_key.len == 0) {
+            try app.setLastProviderError("Missing API key");
+            return error.MissingApiKey;
         }
-        if (tools.len > 0 and std.mem.eql(u8, app.config.provider, "gemini")) {
-            if (std.mem.indexOf(u8, decoded_error, "Function calling config is set without function_declarations") != null) {
-                try observer.status("provider retry without tools");
-                return sendTurnObserved(app, &.{}, observer);
+
+        const auth_header = try std.fmt.allocPrint(app.allocator, "Bearer {s}", .{request_api_key});
+        defer app.allocator.free(auth_header);
+
+        var request = try client.request(.POST, uri, .{
+            .headers = .{
+                .content_type = .{ .override = "application/json" },
+                .authorization = .{ .override = auth_header },
+            },
+            .extra_headers = &client_headers,
+        });
+        defer request.deinit();
+
+        request.transfer_encoding = .{ .content_length = body.len };
+        var body_writer = try request.sendBodyUnflushed(&.{});
+        try body_writer.writer.writeAll(body);
+        try body_writer.end();
+        try request.connection.?.flush();
+
+        var response = try request.receiveHead(&.{});
+        if (response.head.status != .ok) {
+            var transfer_buffer_error: [16 * 1024]u8 = undefined;
+            var error_reader = response.reader(&transfer_buffer_error);
+            var error_body_writer: std.Io.Writer.Allocating = .init(app.allocator);
+            defer error_body_writer.deinit();
+            _ = error_reader.streamRemaining(&error_body_writer.writer) catch 0;
+            const decoded_error = try decodeHttpBody(app.allocator, error_body_writer.written());
+            defer app.allocator.free(decoded_error);
+            if (decoded_error.len > 0) {
+                if (try extractProviderErrorMessage(app.allocator, decoded_error)) |message| {
+                    defer app.allocator.free(message);
+                    const full = try std.fmt.allocPrint(app.allocator, "provider error ({s}): {s}", .{
+                        @tagName(response.head.status),
+                        message,
+                    });
+                    defer app.allocator.free(full);
+                    try app.setLastProviderError(full);
+                } else {
+                    try app.setLastProviderError(decoded_error);
+                }
             }
-        }
-        if (decoded_error.len > 0) {
-            if (try extractProviderErrorMessage(app.allocator, decoded_error)) |message| {
-                defer app.allocator.free(message);
-                const full = try std.fmt.allocPrint(app.allocator, "provider error ({s}): {s}", .{
-                    @tagName(response.head.status),
-                    message,
-                });
-                defer app.allocator.free(full);
-                try app.setLastProviderError(full);
-            } else {
-                try app.setLastProviderError(decoded_error);
+            if (isOpenRouterBaseUrl(app.config.base_url) and attempt + 1 < openrouter_attempts and isOpenRouterRetryableStatus(response.head.status)) {
+                try observer.status("provider retry with next openrouter key");
+                continue;
             }
-        }
-        try observer.status("provider error");
-        return error.ProviderRequestFailed;
-    }
-    try observer.status("provider stream open");
-    return parseStreamingResponse(app.allocator, &response, observer) catch |err| switch (err) {
-        error.SyntaxError => {
-            try app.setLastProviderError("provider returned an unparseable streaming response");
-            try observer.status("provider parse error");
+            try observer.status("provider error");
             return error.ProviderRequestFailed;
-        },
-        else => return err,
-    };
+        }
+        try observer.status("provider stream open");
+        return parseStreamingResponse(app.allocator, &response, observer) catch |err| switch (err) {
+            error.SyntaxError => {
+                try app.setLastProviderError("provider returned an unparseable streaming response");
+                try observer.status("provider parse error");
+                return error.ProviderRequestFailed;
+            },
+            else => return err,
+        };
+    }
+    try observer.status("provider error");
+    return error.ProviderRequestFailed;
 }
 
 fn sendTurnViaCurl(app: *App, body: []const u8, observer: TurnObserver) !TurnResult {
+    const request_api_key = try requestApiKey(app.allocator, app.config.base_url, app.config.api_key);
+    defer if (request_api_key.ptr != app.config.api_key.ptr) app.allocator.free(request_api_key);
+
     var args = std.ArrayList([]const u8).empty;
     defer args.deinit(app.allocator);
 
-    const auth_header = try std.fmt.allocPrint(app.allocator, "Authorization: Bearer {s}", .{app.config.api_key});
+    const auth_header = try std.fmt.allocPrint(app.allocator, "Authorization: Bearer {s}", .{request_api_key});
     defer app.allocator.free(auth_header);
 
     const temp_dir = std.process.getEnvVarOwned(app.allocator, "TEMP") catch try app.allocator.dupe(u8, ".");
@@ -344,6 +360,34 @@ fn sendTurnViaCurl(app: *App, body: []const u8, observer: TurnObserver) !TurnRes
     return try emitParsedResponse(observer, .{ .assistant_text = try text_out.toOwnedSlice(app.allocator) }, true);
 }
 
+fn requestApiKey(allocator: std.mem.Allocator, base_url: []const u8, fallback: []const u8) ![]const u8 {
+    if (isOpenRouterBaseUrl(base_url)) {
+        if (try openrouter_pool.nextKey(allocator)) |key| return key;
+    }
+    return fallback;
+}
+
+fn isOpenRouterBaseUrl(base_url: []const u8) bool {
+    return std.mem.indexOf(u8, base_url, "openrouter.ai") != null;
+}
+
+fn isOpenRouterRetryableStatus(status: std.http.Status) bool {
+    return switch (status) {
+        .unauthorized,
+        .payment_required,
+        .forbidden,
+        .request_timeout,
+        .conflict,
+        .too_many_requests,
+        .internal_server_error,
+        .bad_gateway,
+        .service_unavailable,
+        .gateway_timeout,
+        => true,
+        else => false,
+    };
+}
+
 fn buildRequestBody(
     allocator: std.mem.Allocator,
     app: *App,
@@ -352,6 +396,8 @@ fn buildRequestBody(
 ) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
+    const runtime_prompt = try provider_prompt.buildRuntimePrompt(allocator, tools);
+    defer allocator.free(runtime_prompt);
 
     try out.writer.writeByte('{');
     try out.writer.writeAll("\"model\":");
@@ -359,16 +405,10 @@ fn buildRequestBody(
     try out.writer.writeAll(",\"messages\":[");
 
     var needs_comma = false;
-    if (app.plan_mode) {
-        try writeMessagePrefix(&out.writer, &needs_comma);
-        try out.writer.writeAll("{\"role\":\"system\",\"content\":");
-        try std.json.Stringify.value(
-            "You are Cirebronx, a coding agent. Prefer tool use for codebase inspection and edits. Keep plans explicit before complex changes.",
-            .{},
-            &out.writer,
-        );
-        try out.writer.writeByte('}');
-    }
+    try writeMessagePrefix(&out.writer, &needs_comma);
+    try out.writer.writeAll("{\"role\":\"system\",\"content\":");
+    try std.json.Stringify.value(runtime_prompt, .{}, &out.writer);
+    try out.writer.writeByte('}');
 
     for (app.session.items) |msg| {
         try writeMessagePrefix(&out.writer, &needs_comma);
@@ -438,7 +478,13 @@ fn parseStreamingResponse(
         return try emitParsedResponse(observer, .{ .tool_calls = owned }, true);
     }
 
-    return try emitParsedResponse(observer, .{ .assistant_text = try text_out.toOwnedSlice(allocator) }, true);
+    const text = try text_out.toOwnedSlice(allocator);
+    errdefer allocator.free(text);
+    if (try extractPseudoToolCalls(allocator, text)) |calls| {
+        allocator.free(text);
+        return try emitParsedResponse(observer, .{ .tool_calls = calls }, true);
+    }
+    return try emitParsedResponse(observer, .{ .assistant_text = text }, true);
 }
 
 fn emitParsedResponse(observer: TurnObserver, result: TurnResult, already_streamed: bool) !TurnResult {
@@ -453,6 +499,91 @@ fn emitParsedResponse(observer: TurnObserver, result: TurnResult, already_stream
         },
     }
     return result;
+}
+
+fn extractPseudoToolCalls(allocator: std.mem.Allocator, text: []const u8) !?[]message_mod.ToolCall {
+    var calls = std.ArrayList(message_mod.ToolCall).empty;
+    errdefer {
+        for (calls.items) |*call| call.deinit(allocator);
+        calls.deinit(allocator);
+    }
+
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, text, cursor, "CALL>")) |marker| {
+        const json_start = marker + "CALL>".len;
+        if (json_start >= text.len or text[json_start] != '{') {
+            cursor = json_start;
+            continue;
+        }
+        const json_len = findBalancedJsonObject(text[json_start..]) orelse break;
+        const payload = text[json_start .. json_start + json_len];
+
+        const parsed = std.json.parseFromSlice(struct {
+            name: []const u8,
+            arguments: std.json.Value,
+        }, allocator, payload, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            cursor = json_start + 1;
+            continue;
+        };
+        defer parsed.deinit();
+
+        var rendered: std.Io.Writer.Allocating = .init(allocator);
+        defer rendered.deinit();
+        try std.json.Stringify.value(parsed.value.arguments, .{}, &rendered.writer);
+        const arguments = try allocator.dupe(u8, rendered.written());
+        errdefer allocator.free(arguments);
+        const id = try std.fmt.allocPrint(allocator, "call_text_{d}", .{calls.items.len + 1});
+        errdefer allocator.free(id);
+        const name = try allocator.dupe(u8, parsed.value.name);
+        errdefer allocator.free(name);
+
+        try calls.append(allocator, .{
+            .id = id,
+            .name = name,
+            .arguments = arguments,
+        });
+        cursor = json_start + json_len;
+    }
+
+    if (calls.items.len == 0) {
+        calls.deinit(allocator);
+        return null;
+    }
+    return try calls.toOwnedSlice(allocator);
+}
+
+fn findBalancedJsonObject(text: []const u8) ?usize {
+    if (text.len == 0 or text[0] != '{') return null;
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (text, 0..) |byte, index| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (byte == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (byte == '"') in_string = false;
+            continue;
+        }
+
+        switch (byte) {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return index + 1;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn consumeStreamEvent(
@@ -809,10 +940,31 @@ test "parseResponse parses non-stream tool calls" {
     try std.testing.expectEqualStrings("{}", result.tool_calls[0].arguments);
 }
 
+test "parseResponse converts textual CALL syntax into tool calls" {
+    const result = try parseResponse(
+        std.testing.allocator,
+        "{\"choices\":[{\"message\":{\"content\":\"CALL>{\\\"name\\\":\\\"write_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"src/main.java\\\",\\\"content\\\":\\\"class Main {}\\\"}}\"}}]}",
+    );
+    defer switch (result) {
+        .assistant_text => |text| std.testing.allocator.free(text),
+        .tool_calls => |calls| {
+            for (calls) |*call| call.deinit(std.testing.allocator);
+            std.testing.allocator.free(calls);
+        },
+    };
+
+    try std.testing.expect(result == .tool_calls);
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+    try std.testing.expectEqualStrings("write_file", result.tool_calls[0].name);
+    try std.testing.expect(std.mem.indexOf(u8, result.tool_calls[0].arguments, "\"path\":\"src/main.java\"") != null);
+}
+
 test "buildRequestBody omits tool config when no tools are exposed" {
     var app = try App.init(std.testing.allocator);
     defer app.deinit();
+    std.testing.allocator.free(app.config.model);
     app.config.model = try std.testing.allocator.dupe(u8, "gemini-2.5-flash");
+    std.testing.allocator.free(app.config.provider);
     app.config.provider = try std.testing.allocator.dupe(u8, "gemini");
 
     const body = try buildRequestBody(std.testing.allocator, &app, &.{}, true);
@@ -821,11 +973,13 @@ test "buildRequestBody omits tool config when no tools are exposed" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tools\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_choice\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"system\"") != null);
 }
 
 test "buildRequestBody includes tool config when tools are exposed" {
     var app = try App.init(std.testing.allocator);
     defer app.deinit();
+    std.testing.allocator.free(app.config.model);
     app.config.model = try std.testing.allocator.dupe(u8, "gpt-test");
 
     const exposed = [_]tool_base.ToolSpec{
@@ -843,6 +997,7 @@ test "buildRequestBody includes tool config when tools are exposed" {
 
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tools\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_choice\":\"auto\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Tool inventory") != null);
 }
 
 fn writeMessagePrefix(writer: *std.Io.Writer, needs_comma: *bool) !void {
@@ -924,5 +1079,11 @@ fn parseResponse(
         return .{ .tool_calls = owned };
     }
 
-    return .{ .assistant_text = try allocator.dupe(u8, msg.content orelse "") };
+    const text = try allocator.dupe(u8, msg.content orelse "");
+    errdefer allocator.free(text);
+    if (try extractPseudoToolCalls(allocator, text)) |calls| {
+        allocator.free(text);
+        return .{ .tool_calls = calls };
+    }
+    return .{ .assistant_text = text };
 }
