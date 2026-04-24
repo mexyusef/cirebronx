@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const fmus_mod = b.createModule(.{
+        .root_source_file = b.path("../fmus-zig/src/fmus.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -15,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     root_module.addImport("ziggy", ziggy_mod);
+    root_module.addImport("fmus", fmus_mod);
 
     const exe = b.addExecutable(.{
         .name = "cirebronx",
@@ -36,6 +42,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_module.addImport("ziggy", ziggy_mod);
+    test_module.addImport("fmus", fmus_mod);
 
     const exe_tests = b.addTest(.{
         .root_module = test_module,

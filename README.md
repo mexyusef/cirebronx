@@ -46,6 +46,34 @@ zig build run -- --tui
 zig build run -- "inspect this repository"
 ```
 
+## App-Server
+
+`cirebronx` also exposes a first headless app-server mode over WebSocket JSON-RPC 2.0.
+
+```powershell
+zig build run -- --app-server
+zig build run -- --app-server 9241
+```
+
+Default listener:
+
+```text
+ws://127.0.0.1:9240
+```
+
+Current JSON-RPC methods:
+
+- `status/read`
+- `config/read`
+- `session/list`
+- `session/read`
+- `tool/list`
+- `tool/call`
+- `mcp/list`
+- `mcp/call`
+- `turn/start`
+- `turn/interrupt`
+
 ## Provider Setup
 
 Example: Gemini

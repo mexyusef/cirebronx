@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const cli = @import("cli/args.zig");
+const app_server = @import("app_server/server.zig");
 const repl = @import("cli/repl.zig");
 const tui = @import("cli/tui.zig");
 const app_mod = @import("core/app.zig");
@@ -45,7 +46,7 @@ pub fn main() !void {
     app.config.deinit(allocator);
     app.config = loaded_config;
 
-    runParsedCommand(&app, allocator, parsed.command, parsed.prompt, parsed.session_id) catch |err| {
+    runParsedCommand(&app, allocator, parsed.command, parsed.prompt, parsed.session_id, parsed.port) catch |err| {
         switch (err) {
             error.ProviderRequestFailed, error.MissingApiKey => std.process.exit(1),
             else => return err,
@@ -59,11 +60,14 @@ fn runParsedCommand(
     command: cli.Command,
     prompt: ?[]const u8,
     session_id: ?[]const u8,
+    port: ?u16,
 ) !void {
     if (command == .chat) {
         try repl.runSingleShot(app, prompt.?);
     } else if (command == .tui) {
         try tui.runInteractive(app);
+    } else if (command == .app_server) {
+        try app_server.run(app, port orelse app_server.default_port);
     } else if (command == .resume_session) {
         var loaded = try session_mod.loadSession(allocator, app.config.paths, session_id.?);
         defer loaded.deinit(allocator);
@@ -78,6 +82,7 @@ fn runParsedCommand(
 
 test "main imports compile" {
     _ = cli;
+    _ = app_server;
     _ = repl;
     _ = tui;
     _ = app_mod;

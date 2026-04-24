@@ -4,10 +4,8 @@ const ziggy = @import("ziggy");
 const App = @import("../core/app.zig").App;
 const commands = @import("../commands/registry.zig");
 const permissions = @import("../core/permissions.zig");
-const provider = @import("../provider/adapter.zig");
-const session_store = @import("../storage/session.zig");
 const prompt_history_store = @import("../storage/prompt_history.zig");
-const tools = @import("../tools/registry.zig");
+const runtime_turn = @import("../runtime/turn.zig");
 const tui_state = @import("tui_state.zig");
 const tui_layout = @import("tui_layout.zig");
 
@@ -148,21 +146,6 @@ pub fn runPromptLine(
     interactive: bool,
 ) !void {
     try persistPromptHistory(app, prompt);
-
-    try app.appendMessage(.{
-        .role = .user,
-        .content = prompt,
-    });
-
-    const ctx = tools.ExecutionContext{
-        .app = app,
-        .io = permissions.PromptIo{
-            .stdout = stdout,
-            .stdin = stdin,
-            .interactive = interactive,
-        },
-    };
-    const visible_tools = tools.toolsForExposure(app);
     var observer = WriterObserver.init(
         app.allocator,
         .{
@@ -173,52 +156,30 @@ pub fn runPromptLine(
     );
     defer observer.deinit();
 
-    var step: usize = 0;
-    while (step < 8) : (step += 1) {
-        var turn = try provider.sendTurnObserved(app, visible_tools, .{
-            .context = &observer,
-            .on_text_chunk = onTextChunk,
-            .on_status = onStatus,
-        });
-        defer turn.deinit(app.allocator);
+    var turn_result = try runtime_turn.runPrompt(app, prompt, .{
+        .context = &observer,
+        .on_text_chunk = onTextChunk,
+        .on_status = onStatus,
+        .on_tool_calls = onToolCalls,
+    }, .{
+        .io = .{
+            .stdout = stdout,
+            .stdin = stdin,
+            .interactive = interactive,
+        },
+    });
+    defer turn_result.deinit(app.allocator);
 
-        switch (turn) {
-            .assistant_text => |text| {
-                if (!observer.wrote_text) {
-                    try renderMarkdownBlock(stdout, app.allocator, text, observer.width);
-                } else {
-                    try observer.finishStream();
-                }
-                if (observer.line_open) try stdout.writeByte('\n');
-                try stdout.flush();
-                try app.appendAssistantText(text);
-                observer.reset();
-                break;
-            },
-            .tool_calls => |calls| {
-                observer.reset();
-                try app.appendAssistantToolCalls(calls);
-                for (calls) |call| {
-                    try stdout.print("{s}[tool]{s} {s}\n", .{ color_tool, color_reset, call.name });
-                    try stdout.flush();
-                    const result = tools.executeTool(app.allocator, ctx, call) catch |err| blk: {
-                        break :blk try std.fmt.allocPrint(app.allocator, "tool error: {s}", .{@errorName(err)});
-                    };
-                    defer app.allocator.free(result);
-                    try app.appendToolResult(call.id, call.name, result);
-                }
-            },
+    if (turn_result.final_text) |text| {
+        if (!observer.wrote_text) {
+            try renderMarkdownBlock(stdout, app.allocator, text, observer.width);
+        } else {
+            try observer.finishStream();
         }
+        if (observer.line_open) try stdout.writeByte('\n');
+        try stdout.flush();
+        observer.reset();
     }
-
-    try session_store.saveSession(
-        app.allocator,
-        app.config.paths,
-        app.session_id,
-        app.cwd,
-        app.config.model,
-        app.session.items,
-    );
 }
 
 fn persistPromptHistory(app: *App, prompt: []const u8) !void {
@@ -325,6 +286,15 @@ fn onStatus(raw: ?*anyopaque, text: []const u8) !void {
     _ = text;
     const observer: *WriterObserver = @ptrCast(@alignCast(raw.?));
     if (observer.interactive) try observer.stdout.flush();
+}
+
+fn onToolCalls(raw: ?*anyopaque, calls: []const @import("../core/message.zig").ToolCall) !void {
+    const observer: *WriterObserver = @ptrCast(@alignCast(raw.?));
+    observer.reset();
+    for (calls) |call| {
+        try observer.stdout.print("{s}[tool]{s} {s}\n", .{ color_tool, color_reset, call.name });
+    }
+    try observer.stdout.flush();
 }
 
 fn printRuntimeError(app: *App, stdout: *std.Io.Writer, err: anyerror) !void {
